@@ -16,7 +16,8 @@ for human readability.
   which preserve hydrostatic states with constant virtual temperature and constant virtual
   potential temperature, the source terms `SourceTermsWarmRain`, and an optional
   saturation adjustment with `NonlinearSolveDG` as for the
-  `CompressibleRainyEulerEquations2D`.
+  `CompressibleRainyEulerEquations2D`. The frictional heating by falling rain can be
+  turned off with `rain_frictional_heating = false`.
 - The `CompressibleEulerVectorInvariantEquationsWithGravity3D` are the compressible Euler
   equations with gravity in vector-invariant form with the potential temperature as
   prognostic variable. They come with the entropy and total energy conservative volume flux

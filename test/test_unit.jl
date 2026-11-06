@@ -999,6 +999,28 @@ end
     @test iszero(TrixiAtmo.terminal_velocity_rain(Base.setindex(u, 0.0, 7),
                                                 equations_doppler))
     @test similar(equations_doppler, Float32).rain_fall_speed_doppler_etal
+
+    # Switching off the frictional heating by falling rain affects only the equation of the
+    # virtual potential temperature
+    equations_no_friction = CompressibleRainyEulerVectorInvariantEquations2D(c_pd = 1004.0,
+                                                                             c_vd = 717.0,
+                                                                             R_v = 461.0,
+                                                                             gravity = EARTH_GRAVITATIONAL_ACCELERATION,
+                                                                             rain_frictional_heating = false)
+    @test !similar(equations_no_friction, Float32).rain_frictional_heating
+    u_rr = SVector(0.9, 0.3, -1.2, 280.5, 0.008, 0.001, 0.004, 1700.0)
+    normal_direction = SVector(0.5, 1.2)
+    for nonconservative_flux in (flux_nonconservative_isothermal_isentropic,
+                                 flux_nonconservative_isentropic)
+        noncons = nonconservative_flux(u, u_rr, normal_direction, equations)
+        noncons_no_friction = nonconservative_flux(u, u_rr, normal_direction,
+                                                   equations_no_friction)
+        # With rain and an increase of the geopotential, the frictional heating is nonzero.
+        # It is negative since the nonconservative terms are on the left-hand side.
+        @test noncons[4] < 0
+        @test iszero(noncons_no_friction[4])
+        @test noncons_no_friction[[1, 2, 3, 5, 6, 7, 8]] ≈ noncons[[1, 2, 3, 5, 6, 7, 8]]
+    end
     @test_throws ArgumentError CompressibleRainyEulerVectorInvariantEquations2D(rain_fall_speed = :foo)
 
     # Saturation adjustment: the Jacobian agrees with finite differences of the residual

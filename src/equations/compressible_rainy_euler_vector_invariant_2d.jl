@@ -4,7 +4,8 @@
 @doc raw"""
     CompressibleRainyEulerVectorInvariantEquations2D(; c_pd = 1004, c_vd = 717, R_v = 461,
                                                      gravity = EARTH_GRAVITATIONAL_ACCELERATION,
-                                                     rain_fall_speed = :liquid_water)
+                                                     rain_fall_speed = :liquid_water,
+                                                     rain_frictional_heating = true)
 
 The compressible Euler equations with warm-rain microphysics in two space dimensions in
 vector-invariant form, with the virtual potential temperature as thermodynamic prognostic
@@ -54,7 +55,10 @@ the terminal velocity of rain follow the Kessler-type warm-rain scheme of
 [`CompressibleRainyEulerEquations2D`](@ref). The frictional heating by falling rain is
 written as the nonconservative product
 ``-\varrho_r v_r / (c_{pd} \Pi) \, \partial_z \phi`` so that the hyperbolic part conserves
-the total energy.
+the total energy. It can be turned off with `rain_frictional_heating = false`, e.g., for
+comparisons with the [`CompressibleRainyEulerEquations2D`](@ref), whose energy equation does
+not contain it. Then, the potential energy released by falling rain is lost, and the total
+energy is not conserved.
 
 The terminal velocity of rain is
 ``v_r = v_0 \Gamma(4.5) / 6 \, (\varrho_r / (\pi \varrho_w N_0))^{1/8}``
@@ -105,12 +109,16 @@ struct CompressibleRainyEulerVectorInvariantEquations2D{RealT <: Real} <:
     # If `true`, use the density of all water species instead of the density of liquid
     # water in the terminal velocity of rain, as in `CompressibleRainyEulerEquations2D`
     rain_fall_speed_doppler_etal::Bool
+    # If `true`, include the frictional heating by falling rain in the equation of the
+    # virtual potential temperature, which is required for conservation of total energy
+    rain_frictional_heating::Bool
 end
 
 function CompressibleRainyEulerVectorInvariantEquations2D(; c_pd = 1004, c_vd = 717,
                                                           R_v = 461,
                                                           gravity = EARTH_GRAVITATIONAL_ACCELERATION,
-                                                          rain_fall_speed = :liquid_water)
+                                                          rain_fall_speed = :liquid_water,
+                                                          rain_frictional_heating = true)
     if rain_fall_speed === :liquid_water
         rain_fall_speed_doppler_etal = false
     elseif rain_fall_speed === :doppler_etal
@@ -141,7 +149,8 @@ function CompressibleRainyEulerVectorInvariantEquations2D(; c_pd = 1004, c_vd = 
                                                                    rho_liquid_water,
                                                                    rain_water_distr,
                                                                    v_mean_rain,
-                                                                   rain_fall_speed_doppler_etal)
+                                                                   rain_fall_speed_doppler_etal,
+                                                                   rain_frictional_heating)
 end
 
 # Together with the specialization of `Adapt.adapt_structure` in Trixi.jl,
@@ -153,8 +162,10 @@ function Base.similar(equations::CompressibleRainyEulerVectorInvariantEquations2
                                          equations.g))
     rain_fall_speed = equations.rain_fall_speed_doppler_etal ? :doppler_etal :
                       :liquid_water
+    rain_frictional_heating = equations.rain_frictional_heating
     return CompressibleRainyEulerVectorInvariantEquations2D(; c_pd, c_vd, R_v, gravity,
-                                                          rain_fall_speed)
+                                                          rain_fall_speed,
+                                                          rain_frictional_heating)
 end
 
 function varnames(::typeof(cons2cons),
@@ -363,10 +374,14 @@ end
     g3 = g3 + gradient * normal_direction[2]
 
     # Frictional heating by falling rain, -(ρ_r v_r / (c_pd Π)) ∂_z φ
-    g4 = -rain_mass_flux_ll / (equations.c_pd * exner_ll) * normal_direction[2] *
-         jump_phi
-
     zero_ = zero(eltype(u_ll))
+    if equations.rain_frictional_heating
+        g4 = -rain_mass_flux_ll / (equations.c_pd * exner_ll) * normal_direction[2] *
+             jump_phi
+    else
+        g4 = zero_
+    end
+
     return SVector(zero_, g2, g3, g4, zero_, zero_, zero_, zero_)
 end
 

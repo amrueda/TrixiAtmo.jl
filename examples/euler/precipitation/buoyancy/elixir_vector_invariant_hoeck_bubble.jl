@@ -9,12 +9,12 @@
 # - the rates of autoconversion, accretion, and rain evaporation of the
 #   `CompressibleRainyEulerEquations2D`, with evaporation only (no condensation on rain),
 # - the terminal velocity of rain of the `CompressibleRainyEulerEquations2D`
-#   (`rain_fall_speed = :doppler_etal`).
+#   (`rain_fall_speed = :doppler_etal`),
+# - no frictional heating by falling rain (`rain_frictional_heating = false`), which is not
+#   contained in the energy equation of the `CompressibleRainyEulerEquations2D`.
 # The hydrostatic background state and the bubble are computed as in
 # `elixir_hoeck_bubble.jl`, but with the saturation vapor pressure of the constant-kappa
-# system. Remaining differences are the discretization (`P4estMesh`, standard fluxes) and
-# the frictional heating by falling rain, which is not contained in the energy equation of
-# the `CompressibleRainyEulerEquations2D`.
+# system. The remaining difference is the discretization (`P4estMesh`, standard fluxes).
 #
 # References:
 # - Wojciech W. Grabowski, Terry L. Clark (1991)
@@ -38,7 +38,8 @@ coordinates_max = (2400.0, 2400.0)
 equations = CompressibleRainyEulerVectorInvariantEquations2D(c_pd = 1004, c_vd = 717,
                                                              R_v = 461,
                                                              gravity = EARTH_GRAVITATIONAL_ACCELERATION,
-                                                             rain_fall_speed = :doppler_etal)
+                                                             rain_fall_speed = :doppler_etal,
+                                                             rain_frictional_heating = false)
 
 ###############################################################################
 # initial condition, computed as in `elixir_hoeck_bubble.jl`
