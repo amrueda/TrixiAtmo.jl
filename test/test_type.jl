@@ -720,3 +720,23 @@ end
         @test eltype(@inferred Trixi.max_abs_speeds(u, equations)) == RealT
     end
 end
+
+@testitem "Type stability: Compressible Rainy Euler Vector Invariant 2D flux_etec" setup=[Setup] tags=[:type_stable_tests] begin
+    for RealT in (Float32, Float64)
+        equations = @inferred CompressibleRainyEulerVectorInvariantEquations2D(c_pd = RealT(1004),
+                                                                               c_vd = RealT(717),
+                                                                               R_v = RealT(461),
+                                                                               gravity = RealT(EARTH_GRAVITATIONAL_ACCELERATION))
+        u_ll = SVector(one(RealT), one(RealT), one(RealT), convert(RealT, 300),
+                       convert(RealT, 0.01), convert(RealT, 0.001), convert(RealT, 0.001),
+                       one(RealT))
+        u_rr = SVector(convert(RealT, 0.9), -one(RealT), convert(RealT, 0.5),
+                       convert(RealT, 280), convert(RealT, 0.008), convert(RealT, 0.002),
+                       convert(RealT, 0.002), convert(RealT, 2))
+        normal_direction = SVector(one(RealT), one(RealT))
+
+        flux_left, flux_right = @inferred flux_etec(u_ll, u_rr, normal_direction, equations)
+        @test eltype(flux_left) == RealT
+        @test eltype(flux_right) == RealT
+    end
+end

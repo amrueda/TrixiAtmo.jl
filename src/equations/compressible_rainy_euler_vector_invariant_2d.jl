@@ -440,6 +440,120 @@ The remaining nonconservative terms are discretized as in
                                                   theta_v_num, equations)
 end
 
+"""
+    flux_etec(u_ll, u_rr, normal_direction::AbstractVector,
+              equations::CompressibleRainyEulerVectorInvariantEquations2D)
+
+Two-point volume flux for the [`CompressibleRainyEulerVectorInvariantEquations2D`](@ref)
+based on the entropy and total energy conservative (ETEC) flux of
+- Marco Artiano, Kieran Ricardo, Oswald Knoth, Peter Spichtinger, Hendrik Ranocha (2026)
+  Entropy-Stable and Well-Balanced Discontinuous Galerkin Methods for the Compressible
+  Euler Equations in Vector-Invariant Form
+  [arXiv: 2610.05820](https://arxiv.org/abs/2610.05820)
+
+with the total density and the virtual potential temperature ``\\theta_v`` in place of the
+density and the potential temperature of the dry equations:
+- the flux of ``\\varrho \\theta_v`` and the pressure gradient use the inverse logarithmic
+  mean ``\\theta_v^{num} = 1 / \\{\\!\\{ 1 / \\theta_v \\}\\!\\}_{\\log}``,
+- the vorticity terms use the density-weighted velocity
+  ``\\{\\!\\{ \\varrho \\vec{v} \\}\\!\\} / \\{\\!\\{ \\varrho \\}\\!\\}``,
+- the fluxes of the water species are the mass flux ``\\{\\!\\{ \\varrho v_n \\}\\!\\}``
+  multiplied by the arithmetic means of the mass fractions ``q_n = \\varrho_n / \\varrho``,
+- rain falls with the mean rain mass flux
+  ``m^* = \\{\\!\\{ \\varrho_r v_r \\}\\!\\}``, which also enters the transport of momentum
+  by falling rain, ``-m^* / \\{\\!\\{ \\varrho \\}\\!\\} \\, [\\![\\vec{v}]\\!]``, and the
+  frictional heating, ``m^* / (c_{pd} \\{\\!\\{ \\Pi \\}\\!\\}) \\, [\\![\\phi]\\!]``
+  (if `rain_frictional_heating` is enabled).
+
+Properties (constant-``\\kappa`` thermodynamics):
+- Without rain, the flux conserves the total energy for any distribution of the water
+  species.
+- It preserves hydrostatic states at rest with constant virtual temperature and with
+  constant virtual potential temperature.
+- It conserves the thermodynamic entropy (see `entropy`) only if the mass fractions
+  of the water species are continuous across the interface. In general, entropy
+  conservation is not compatible with total energy conservation and both hydrostatic
+  balances within this family of fluxes.
+- With rain, the frictional heating balances the potential energy released by the rain mass
+  flux exactly, whereas the transport of momentum by falling rain leaves a defect
+  ``m^* [\\![\\varrho]\\!] \\lVert [\\![\\vec{v}]\\!] \\rVert^2 / (4 \\{\\!\\{ \\varrho \\}\\!\\})``,
+  multiplied by the vertical component of the normal direction, in the total energy.
+
+It returns the conservative and the nonconservative contributions as a tuple, see
+[`Trixi.combine_conservative_and_nonconservative_fluxes`](@ref). Since the geopotential is
+continuous across interfaces, it is intended as volume flux; use, e.g.,
+`(flux_lax_friedrichs, flux_nonconservative_isothermal_isentropic)` at the surfaces.
+"""
+@inline function flux_etec(u_ll, u_rr, normal_direction::AbstractVector,
+                           equations::CompressibleRainyEulerVectorInvariantEquations2D)
+    rho_ll, v1_ll, v2_ll, rho_theta_v_ll = u_ll
+    rho_rr, v1_rr, v2_rr, rho_theta_v_rr = u_rr
+    _, _, _, _, rho_vapor_ll, rho_cloud_ll, rho_rain_ll, phi_ll = u_ll
+    _, _, _, _, rho_vapor_rr, rho_cloud_rr, rho_rain_rr, phi_rr = u_rr
+    exner_ll = exner_pressure(u_ll, equations)
+    exner_rr = exner_pressure(u_rr, equations)
+
+    v_dot_n_ll = v1_ll * normal_direction[1] + v2_ll * normal_direction[2]
+    v_dot_n_rr = v1_rr * normal_direction[1] + v2_rr * normal_direction[2]
+
+    # Mean values
+    rho_avg = 0.5f0 * (rho_ll + rho_rr)
+    kinetic_energy_avg = 0.25f0 * (v1_ll^2 + v2_ll^2 + v1_rr^2 + v2_rr^2)
+    v1_avg = 0.5f0 * (rho_ll * v1_ll + rho_rr * v1_rr) / rho_avg
+    v2_avg = 0.5f0 * (rho_ll * v2_ll + rho_rr * v2_rr) / rho_avg
+    theta_v_mean = inv_ln_mean(rho_ll / rho_theta_v_ll, rho_rr / rho_theta_v_rr)
+    q_vapor_avg = 0.5f0 * (rho_vapor_ll / rho_ll + rho_vapor_rr / rho_rr)
+    q_cloud_avg = 0.5f0 * (rho_cloud_ll / rho_ll + rho_cloud_rr / rho_rr)
+    q_rain_avg = 0.5f0 * (rho_rain_ll / rho_ll + rho_rain_rr / rho_rr)
+    rain_mass_flux_avg = 0.5f0 *
+                         (rho_rain_ll * terminal_velocity_rain(u_ll, equations) +
+                          rho_rain_rr * terminal_velocity_rain(u_rr, equations))
+
+    # Conservative part: mass flux of the air, sedimentation of rain, Bernoulli term,
+    # and fluxes of the virtual potential temperature and the water species
+    mass_flux = 0.5f0 * (rho_ll * v_dot_n_ll + rho_rr * v_dot_n_rr)
+    rain_flux = rain_mass_flux_avg * normal_direction[2]
+    f1 = mass_flux - rain_flux
+    f2 = kinetic_energy_avg * normal_direction[1]
+    f3 = kinetic_energy_avg * normal_direction[2]
+    f4 = mass_flux * theta_v_mean
+    f5 = mass_flux * q_vapor_avg
+    f6 = mass_flux * q_cloud_avg
+    f7 = mass_flux * q_rain_avg - rain_flux
+
+    # Nonconservative part, i.e., the vorticity, pressure gradient, gravity, rain transport,
+    # and frictional heating terms. Since it is antisymmetric, the right contribution is
+    # obtained by flipping the sign.
+    jump_v1 = v1_rr - v1_ll
+    jump_v2 = v2_rr - v2_ll
+    jump_phi = phi_rr - phi_ll
+    gradient = equations.c_pd * theta_v_mean * (exner_rr - exner_ll) + jump_phi
+    vorticity = normal_direction[1] * jump_v2 - normal_direction[2] * jump_v1
+    rain_advection = rain_mass_flux_avg / rho_avg * normal_direction[2]
+    g2 = -v2_avg * vorticity - rain_advection * jump_v1 + gradient * normal_direction[1]
+    g3 = v1_avg * vorticity - rain_advection * jump_v2 + gradient * normal_direction[2]
+
+    zero_ = zero(eltype(u_ll))
+    if equations.rain_frictional_heating
+        g4 = -rain_mass_flux_avg / (equations.c_pd * 0.5f0 * (exner_ll + exner_rr)) *
+             normal_direction[2] * jump_phi
+    else
+        g4 = zero_
+    end
+
+    flux_left = SVector(f1, f2 + 0.5f0 * g2, f3 + 0.5f0 * g3, f4 + 0.5f0 * g4, f5, f6, f7,
+                        zero_)
+    flux_right = SVector(f1, f2 - 0.5f0 * g2, f3 - 0.5f0 * g3, f4 - 0.5f0 * g4, f5, f6, f7,
+                         zero_)
+
+    return flux_left, flux_right
+end
+
+@inline function Trixi.combine_conservative_and_nonconservative_fluxes(::typeof(flux_etec),
+                                                                       ::CompressibleRainyEulerVectorInvariantEquations2D)
+    return Trixi.True()
+end
+
 # The speed of sound c = sqrt(γ p / ρ) of the constant-kappa system does not depend on the
 # composition. Rain moves with the additional vertical velocity -v_r.
 @inline function max_abs_speeds(u,

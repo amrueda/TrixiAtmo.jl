@@ -841,3 +841,96 @@ end
         end
     end
 end
+
+@testitem "Unit: Consistency check for flux_etec of rainy vector-invariant equations: CREVIE" setup=[Setup] tags=[:unit_fluxes] begin
+    equations = CompressibleRainyEulerVectorInvariantEquations2D(c_pd = 1004.0,
+                                                                 c_vd = 717.0,
+                                                                 R_v = 461.0,
+                                                                 gravity = EARTH_GRAVITATIONAL_ACCELERATION)
+    # (rho, v1, v2, rho_theta_v, rho_vapor, rho_cloud, rho_rain, phi)
+    u_ll = SVector(1.1, -0.5, 2.34, 330.0, 0.012, 0.002, 0.003, 1500.0)
+    u_rr = SVector(0.9, 0.3, -1.2, 280.5, 0.008, 0.001, 0.004, 1700.0)
+    normal_directions = [SVector(1.0, 0.0), SVector(0.0, 1.0), SVector(0.5, -0.5),
+        SVector(-1.2, 0.3)]
+
+    # Entropy variables of the total energy (up to constant water components, whose jumps
+    # vanish) and the corresponding entropy potential ρ K v_n
+    function energy_variables(u, equations)
+        rho, v1, v2, _, _, _, _, phi = u
+        kinetic_energy = 0.5 * (v1^2 + v2^2)
+        return SVector(kinetic_energy + phi, rho * v1, rho * v2,
+                       equations.c_pd * TrixiAtmo.exner_pressure(u, equations),
+                       0.0, 0.0, 0.0, 0.0)
+    end
+    energy_potential(u, n) = 0.5 * u[1] * (u[2]^2 + u[3]^2) * (u[2] * n[1] + u[3] * n[2])
+
+    # Residual of the discrete condition [[w]] ⋅ f - {{w}} ⋅ g = [[ψ]] for the conservative
+    # part f = (flux_left + flux_right) / 2 and the nonconservative part
+    # g = flux_left - flux_right
+    function residual(w_ll, w_rr, u_ll, u_rr, n, psi_jump, equations)
+        flux_left, flux_right = flux_etec(u_ll, u_rr, n, equations)
+        f = 0.5 * (flux_left + flux_right)
+        g = flux_left - flux_right
+        return sum((w_rr - w_ll) .* f) - sum(0.5 * (w_ll + w_rr) .* g) - psi_jump
+    end
+
+    for normal_direction in normal_directions
+        # Consistency and symmetry
+        flux_left, flux_right = flux_etec(u_ll, u_ll, normal_direction, equations)
+        @test flux_left ≈ flux(u_ll, normal_direction, equations)
+        @test flux_right ≈ flux(u_ll, normal_direction, equations)
+        flux_left, flux_right = flux_etec(u_ll, u_rr, normal_direction, equations)
+        flux_left_swapped, flux_right_swapped = flux_etec(u_rr, u_ll, normal_direction,
+                                                          equations)
+        @test flux_left ≈ flux_right_swapped
+        @test flux_right ≈ flux_left_swapped
+        # Homogeneity of degree one in the normal direction
+        flux_left_scaled, _ = flux_etec(u_ll, u_rr, 2.5 * normal_direction, equations)
+        @test flux_left_scaled ≈ 2.5 * flux_left
+
+        # Total energy conservation without rain, for jumping mass fractions
+        u_a = Base.setindex(u_ll, 0.0, 7)
+        u_b = Base.setindex(u_rr, 0.0, 7)
+        psi_jump = energy_potential(u_b, normal_direction) -
+                   energy_potential(u_a, normal_direction)
+        @test isapprox(residual(energy_variables(u_a, equations),
+                                energy_variables(u_b, equations),
+                                u_a, u_b, normal_direction, psi_jump, equations),
+                       0.0; atol = 1.0e-8)
+
+        # Entropy conservation without rain, for continuous mass fractions
+        rho_b = 0.9
+        u_b = SVector(rho_b, 0.3, -1.2, 280.5, rho_b * u_a[5] / u_a[1],
+                      rho_b * u_a[6] / u_a[1], 0.0, 1700.0)
+        @test isapprox(residual(cons2entropy(u_a, equations), cons2entropy(u_b, equations),
+                                u_a, u_b, normal_direction, 0.0, equations),
+                       0.0; atol = 1.0e-8)
+
+        # With rain, the total energy defect is m [[ρ]] |[[v]]|^2 / (4 {{ρ}}) n_2: the
+        # frictional heating balances the potential energy released by the rain exactly
+        rain_mass_flux_avg = 0.5 *
+                             (u_ll[7] * TrixiAtmo.terminal_velocity_rain(u_ll, equations) +
+                              u_rr[7] * TrixiAtmo.terminal_velocity_rain(u_rr, equations))
+        defect = (rain_mass_flux_avg * normal_direction[2] * (u_rr[1] - u_ll[1]) *
+                  ((u_rr[2] - u_ll[2])^2 + (u_rr[3] - u_ll[3])^2) /
+                  (2 * (u_ll[1] + u_rr[1])))
+        psi_jump = energy_potential(u_rr, normal_direction) -
+                   energy_potential(u_ll, normal_direction)
+        @test isapprox(residual(energy_variables(u_ll, equations),
+                                energy_variables(u_rr, equations),
+                                u_ll, u_rr, normal_direction, psi_jump, equations),
+                       defect; atol = 1.0e-8)
+    end
+
+    # The pressure gradient and gravity terms vanish for both hydrostatic states
+    x_ll = SVector(100.0, 250.0)
+    x_rr = SVector(130.0, 410.0)
+    normal_direction = SVector(0.3, 1.1)
+    for initial_condition in (initial_condition_isothermal, initial_condition_adiabatic)
+        u_bottom = initial_condition(x_ll, 0.0, equations)
+        u_top = initial_condition(x_rr, 0.0, equations)
+        flux_left, flux_right = flux_etec(u_bottom, u_top, normal_direction, equations)
+        @test isapprox(flux_left[2] - flux_right[2], 0.0; atol = 1.0e-10)
+        @test isapprox(flux_left[3] - flux_right[3], 0.0; atol = 1.0e-10)
+    end
+end
