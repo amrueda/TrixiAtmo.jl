@@ -738,7 +738,7 @@ end
         normal_direction = SVector(one(RealT), one(RealT))
 
         @test eltype(@inferred flux(u, normal_direction, equations)) == RealT
-        @test eltype(@inferred flux_nonconservative_isothermal(u_ll, u_rr,
+        @test eltype(@inferred flux_nonconservative_isothermal_isentropic(u_ll, u_rr,
                                                                normal_direction,
                                                                equations)) == RealT
         @test eltype(@inferred flux_nonconservative_isentropic(u_ll, u_rr,
@@ -755,6 +755,24 @@ end
 
         source_terms = SourceTermsWarmRain(condensation_time_scale = RealT(5))
         @test eltype(@inferred source_terms(u, x, t, equations)) == RealT
+        source_terms = SourceTermsWarmRain(condensation_time_scale = nothing,
+                                           condensation_on_rain = false)
+        @test eltype(@inferred source_terms(u, x, t, equations)) == RealT
+
+        guess = SVector(convert(RealT, 301), convert(RealT, 0.009),
+                        convert(RealT, 0.002))
+        @test eltype(@inferred TrixiAtmo.saturation_residual(u, guess, equations)) == RealT
+        @test eltype(@inferred TrixiAtmo.saturation_residual_jacobian(u, guess,
+                                                                      equations)) == RealT
+
+        equations_doppler = CompressibleRainyEulerVectorInvariantEquations2D(c_pd = RealT(1004),
+                                                                             c_vd = RealT(717),
+                                                                             R_v = RealT(461),
+                                                                             gravity = RealT(EARTH_GRAVITATIONAL_ACCELERATION),
+                                                                             rain_fall_speed = :doppler_etal)
+        @test typeof(@inferred TrixiAtmo.terminal_velocity_rain(u, equations)) == RealT
+        @test typeof(@inferred TrixiAtmo.terminal_velocity_rain(u, equations_doppler)) ==
+              RealT
         @test eltype(@inferred initial_condition_isothermal(x, t, equations)) == RealT
         @test eltype(@inferred initial_condition_adiabatic(x, t, equations)) == RealT
     end

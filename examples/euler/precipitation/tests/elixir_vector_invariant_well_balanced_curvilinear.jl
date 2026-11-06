@@ -4,9 +4,9 @@
 # (`initial_condition_isothermal`) or constant virtual potential temperature
 # (`initial_condition_adiabatic`) and is subsaturated, so that the microphysics is inactive.
 #
-# `flux_nonconservative_isothermal` preserves both hydrostatic states up to round-off
-# errors, whereas `flux_nonconservative_isentropic` preserves only the state with constant
-# virtual potential temperature.
+# `flux_nonconservative_isothermal_isentropic` preserves both hydrostatic states up to
+# round-off errors, whereas `flux_nonconservative_isentropic` preserves only the state with
+# constant virtual potential temperature.
 #
 # References:
 # - Marco Artiano, Kieran Ricardo, Oswald Knoth, Peter Spichtinger, Hendrik Ranocha (2026)
@@ -21,7 +21,7 @@ equations = CompressibleRainyEulerVectorInvariantEquations2D(c_pd = 1004, c_vd =
                                                              gravity = EARTH_GRAVITATIONAL_ACCELERATION)
 
 initial_condition = initial_condition_isothermal
-nonconservative_flux = flux_nonconservative_isothermal
+nonconservative_flux = flux_nonconservative_isothermal_isentropic
 
 polydeg = 2
 basis = LobattoLegendreBasis(polydeg)

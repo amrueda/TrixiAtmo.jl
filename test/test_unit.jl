@@ -873,7 +873,7 @@ end
         @test flux_lax_friedrichs(u_ll, u_ll, normal_direction, equations) ≈
               flux_physical
 
-        for nonconservative_flux in (flux_nonconservative_isothermal,
+        for nonconservative_flux in (flux_nonconservative_isothermal_isentropic,
                                      flux_nonconservative_isentropic)
             # The nonconservative fluxes are proportional to jumps
             @test all(iszero, nonconservative_flux(u_ll, u_ll, normal_direction,
@@ -891,15 +891,15 @@ end
     end
 
     # The pressure gradient and gravity terms vanish pointwise for hydrostatic states:
-    # constant virtual temperature with `flux_nonconservative_isothermal`, and constant
-    # virtual potential temperature with both fluxes
+    # constant virtual temperature with `flux_nonconservative_isothermal_isentropic`, and
+    # constant virtual potential temperature with both fluxes
     x_ll = SVector(100.0, 250.0)
     x_rr = SVector(130.0, 410.0)
     normal_direction = SVector(0.3, 1.1)
     for (initial_condition, nonconservative_fluxes) in ((initial_condition_isothermal,
-                                                         (flux_nonconservative_isothermal,)),
+                                                         (flux_nonconservative_isothermal_isentropic,)),
                                                         (initial_condition_adiabatic,
-                                                         (flux_nonconservative_isothermal,
+                                                         (flux_nonconservative_isothermal_isentropic,
                                                           flux_nonconservative_isentropic)))
         u_bottom = initial_condition(x_ll, 0.0, equations)
         u_top = initial_condition(x_rr, 0.0, equations)
@@ -954,5 +954,92 @@ end
         @test s[4] ≈
               -equations.L_0 * s[5] /
               (equations.c_pd * TrixiAtmo.exner_pressure(u, equations))
+    end
+
+    # Condensation modes: without condensation source term (saturation adjustment) and
+    # without condensation on rain
+    u = SVector(1.1, 0.0, 0.0, 330.0, 0.03, 0.002, 0.003, 1500.0) # supersaturated
+    T = TrixiAtmo.temperature(u, equations)
+    rho_vs = TrixiAtmo.saturation_vapor_pressure(T, equations) / (equations.R_v * T)
+    @test u[5] > rho_vs
+    x = SVector(0.0, 0.0)
+    source_relaxation = SourceTermsWarmRain(condensation_time_scale = 5.0)
+    source_adjustment = SourceTermsWarmRain(condensation_time_scale = nothing)
+    source_no_condensation_on_rain = SourceTermsWarmRain(condensation_time_scale = nothing,
+                                                         condensation_on_rain = false)
+    s_relaxation = source_relaxation(u, x, 0.0, equations)
+    s_adjustment = source_adjustment(u, x, 0.0, equations)
+    s_no_condensation_on_rain = source_no_condensation_on_rain(u, x, 0.0, equations)
+    conversion = 1.0e-3 * u[6] + 1.72 * u[6] * u[7]^0.875
+    # relaxation: condensation of (rho_vapor - rho_vs) / 5 and condensation on rain
+    @test s_relaxation[6] ≈ (u[5] - rho_vs) / 5.0 - conversion
+    @test s_relaxation[7] > conversion
+    # saturation adjustment: no condensation source term
+    @test s_adjustment[6] ≈ -conversion
+    @test s_adjustment[7] > conversion
+    # no condensation on rain
+    @test s_no_condensation_on_rain[6] ≈ -conversion
+    @test s_no_condensation_on_rain[7] ≈ conversion
+    @test iszero(s_no_condensation_on_rain[4]) && iszero(s_no_condensation_on_rain[5])
+
+    # Terminal velocity of rain: `rain_fall_speed = :doppler_etal` agrees with the
+    # `CompressibleRainyEulerEquations2D`, which use the density of all water species
+    equations_doppler = CompressibleRainyEulerVectorInvariantEquations2D(c_pd = 1004.0,
+                                                                         c_vd = 717.0,
+                                                                         R_v = 461.0,
+                                                                         gravity = EARTH_GRAVITATIONAL_ACCELERATION,
+                                                                         rain_fall_speed = :doppler_etal)
+    equations_rainy = CompressibleRainyEulerEquations2D()
+    u = SVector(1.1, -0.5, 2.34, 330.0, 0.012, 0.002, 0.003, 1500.0)
+    @test TrixiAtmo.terminal_velocity_rain(u, equations_doppler) ≈
+          TrixiAtmo.terminal_velocity_rain(u[5] + u[6], u[7], equations_rainy)
+    @test TrixiAtmo.terminal_velocity_rain(u, equations) ≈
+          TrixiAtmo.terminal_velocity_rain(u, equations_doppler) *
+          ((u[5] + u[6] + u[7]) / equations.rho_liquid_water)^0.125
+    @test iszero(TrixiAtmo.terminal_velocity_rain(Base.setindex(u, 0.0, 7),
+                                                equations_doppler))
+    @test similar(equations_doppler, Float32).rain_fall_speed_doppler_etal
+    @test_throws ArgumentError CompressibleRainyEulerVectorInvariantEquations2D(rain_fall_speed = :foo)
+
+    # Saturation adjustment: the Jacobian agrees with finite differences of the residual
+    for (u, guess) in ((SVector(1.1, 0.0, 0.0, 330.0, 0.03, 0.002, 0.0, 1500.0),
+                        SVector(331.0, 0.02, 0.012)),
+                       (SVector(1.1, 0.0, 0.0, 330.0, 0.001, 0.002, 0.0, 1500.0),
+                        SVector(329.0, 0.0025, 0.0005)))
+        jacobian = TrixiAtmo.saturation_residual_jacobian(u, guess, equations)
+        for k in 1:3
+            epsilon = 1.0e-6 * abs(guess[k])
+            e_k = SVector(ntuple(i -> i == k ? epsilon : 0.0, 3))
+            jacobian_fd = (TrixiAtmo.saturation_residual(u, guess + e_k, equations) -
+                           TrixiAtmo.saturation_residual(u, guess - e_k, equations)) /
+                          (2 * epsilon)
+            @test isapprox(jacobian[:, k], jacobian_fd; rtol = 1.0e-5,
+                           atol = 1.0e-6 * maximum(abs, jacobian))
+        end
+    end
+
+    # Saturation adjustment of supersaturated air (condensation) and of subsaturated air
+    # with cloud water (complete evaporation of the cloud water)
+    function newton_saturation_adjustment(u, equations)
+        guess = SVector(u[4], u[5], u[6])
+        for _ in 1:20
+            residual = TrixiAtmo.saturation_residual(u, guess, equations)
+            maximum(abs, residual) < 1.0e-9 && break
+            guess -= TrixiAtmo.saturation_residual_jacobian(u, guess, equations) \ residual
+        end
+        return SVector(u[1], u[2], u[3], guess[1], guess[2], guess[3], u[7], u[8])
+    end
+    internal_energy(u) = (TrixiAtmo.pressure(u, equations) * equations.inv_gamma_minus_one +
+                          equations.L_0 * u[5])
+    for u in (SVector(1.1, 0.0, 0.0, 330.0, 0.03, 0.002, 0.003, 1500.0),
+              SVector(1.1, 0.0, 0.0, 330.0, 0.001, 0.002, 0.003, 1500.0))
+        u_adjusted = newton_saturation_adjustment(u, equations)
+        T = TrixiAtmo.temperature(u_adjusted, equations)
+        rho_vs = TrixiAtmo.saturation_vapor_pressure(T, equations) / (equations.R_v * T)
+        @test u_adjusted[5] ≈ min(rho_vs, u[5] + u[6])
+        @test u_adjusted[5] + u_adjusted[6] ≈ u[5] + u[6]
+        @test u_adjusted[6] >= -1.0e-14
+        @test internal_energy(u_adjusted) ≈ internal_energy(u)
+        @test u_adjusted[[1, 2, 3, 7, 8]] == u[[1, 2, 3, 7, 8]]
     end
 end

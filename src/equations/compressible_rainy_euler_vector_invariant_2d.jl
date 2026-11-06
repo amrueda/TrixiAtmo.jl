@@ -3,7 +3,8 @@
 
 @doc raw"""
     CompressibleRainyEulerVectorInvariantEquations2D(; c_pd = 1004, c_vd = 717, R_v = 461,
-                                                     gravity = EARTH_GRAVITATIONAL_ACCELERATION)
+                                                     gravity = EARTH_GRAVITATIONAL_ACCELERATION,
+                                                     rain_fall_speed = :liquid_water)
 
 The compressible Euler equations with warm-rain microphysics in two space dimensions in
 vector-invariant form, with the virtual potential temperature as thermodynamic prognostic
@@ -44,7 +45,8 @@ The thermodynamics is the constant-``\kappa`` approximation of Eldred, Taylor, a
 ``\gamma`` do not depend on the composition, the equation of state has the dry form above,
 and the latent heat of vaporization is ``L_v(T) = c_{pd} R_v / R_d \, T + L_v^0``. The
 saturation vapor pressure ``e_s(T)`` is computed consistently from the Clausius-Clapeyron
-relation with this latent heat. The temperature is ``T = p / (R_d \varrho_d + R_v \varrho_v)``.
+relation with this latent heat. The temperature is
+``T = p / (R_d \varrho_d + R_v \varrho_v)``.
 
 The conversion rates ``\mathcal{C}`` (condensation, see [`SourceTermsWarmRain`](@ref)),
 ``\mathcal{A}`` (autoconversion and accretion), and ``\mathcal{E}`` (rain evaporation), and
@@ -53,6 +55,17 @@ the terminal velocity of rain follow the Kessler-type warm-rain scheme of
 written as the nonconservative product
 ``-\varrho_r v_r / (c_{pd} \Pi) \, \partial_z \phi`` so that the hyperbolic part conserves
 the total energy.
+
+The terminal velocity of rain is
+``v_r = v_0 \Gamma(4.5) / 6 \, (\varrho_r / (\pi \varrho_w N_0))^{1/8}``
+for a Marshall-Palmer distribution of raindrops with fall speeds ``v_0 D^{1/2}``
+(COSMO warm-rain scheme). The keyword `rain_fall_speed` selects the density ``\varrho_w``:
+- `:liquid_water` (default): the density of liquid water, ``1000\,\mathrm{kg/m^3}``, as in
+  the mass ``\pi \varrho_w D^3 / 6`` of a raindrop,
+- `:doppler_etal`: the density of all water species,
+  ``\varrho_w = \varrho_v + \varrho_c + \varrho_r``, as in Doppler et al. (2024) and
+  [`CompressibleRainyEulerEquations2D`](@ref). This gives the same fall speed as the latter
+  for the same water densities and is about four times faster than `:liquid_water`.
 
 The variables are `(rho, v1, v2, rho_theta_v, rho_vapor, rho_cloud, rho_rain, phi)`.
 Only `normal_direction` methods are implemented, i.e., the equations are intended for the
@@ -89,11 +102,22 @@ struct CompressibleRainyEulerVectorInvariantEquations2D{RealT <: Real} <:
     rho_liquid_water::RealT # density of liquid water in kg/m³
     rain_water_distr::RealT # intercept parameter N_0 of the Marshall-Palmer distribution
     v_mean_rain::RealT # coefficient v_0 of the fall speed of raindrops v(D) = v_0 D^(1/2)
+    # If `true`, use the density of all water species instead of the density of liquid
+    # water in the terminal velocity of rain, as in `CompressibleRainyEulerEquations2D`
+    rain_fall_speed_doppler_etal::Bool
 end
 
 function CompressibleRainyEulerVectorInvariantEquations2D(; c_pd = 1004, c_vd = 717,
                                                           R_v = 461,
-                                                          gravity = EARTH_GRAVITATIONAL_ACCELERATION)
+                                                          gravity = EARTH_GRAVITATIONAL_ACCELERATION,
+                                                          rain_fall_speed = :liquid_water)
+    if rain_fall_speed === :liquid_water
+        rain_fall_speed_doppler_etal = false
+    elseif rain_fall_speed === :doppler_etal
+        rain_fall_speed_doppler_etal = true
+    else
+        throw(ArgumentError("`rain_fall_speed` must be `:liquid_water` or `:doppler_etal`"))
+    end
     c_pd, c_vd, R_v, g = promote(float(c_pd), float(c_vd), float(R_v), float(gravity))
     RealT = typeof(c_pd)
     p_0 = convert(RealT, 100_000)
@@ -116,7 +140,8 @@ function CompressibleRainyEulerVectorInvariantEquations2D(; c_pd = 1004, c_vd = 
                                                                    L_ref, L_0,
                                                                    rho_liquid_water,
                                                                    rain_water_distr,
-                                                                   v_mean_rain)
+                                                                   v_mean_rain,
+                                                                   rain_fall_speed_doppler_etal)
 end
 
 # Together with the specialization of `Adapt.adapt_structure` in Trixi.jl,
@@ -126,7 +151,10 @@ function Base.similar(equations::CompressibleRainyEulerVectorInvariantEquations2
     c_pd, c_vd, R_v, gravity = convert.(NewRealT,
                                         (equations.c_pd, equations.c_vd, equations.R_v,
                                          equations.g))
-    return CompressibleRainyEulerVectorInvariantEquations2D(; c_pd, c_vd, R_v, gravity)
+    rain_fall_speed = equations.rain_fall_speed_doppler_etal ? :doppler_etal :
+                      :liquid_water
+    return CompressibleRainyEulerVectorInvariantEquations2D(; c_pd, c_vd, R_v, gravity,
+                                                          rain_fall_speed)
 end
 
 function varnames(::typeof(cons2cons),
@@ -183,19 +211,24 @@ end
 
 # Mass-weighted terminal fall speed of rain for a Marshall-Palmer distribution with
 # intercept parameter N_0 and fall speeds of raindrops v(D) = v_0 D^(1/2), i.e.,
-# v_r = v_0 Γ(4.5) / 6 (ρ_r / (π ρ_w N_0))^(1/8), where ρ_w is the density of liquid
-# water.
-# Note that `terminal_velocity_rain` of `CompressibleRainyEulerEquations2D` uses the
-# density of moist air and rain instead of ρ_w.
-@inline function terminal_velocity_rain(rho_rain,
+# v_r = v_0 Γ(4.5) / 6 (ρ_r / (π ρ_w N_0))^(1/8). Physically, ρ_w is the density of
+# liquid water in the mass π ρ_w D^3 / 6 of a raindrop (COSMO warm-rain scheme). With
+# `rain_fall_speed = :doppler_etal`, ρ_w = ρ_v + ρ_c + ρ_r is used instead as in Doppler et
+# al. (2024) and `terminal_velocity_rain` of `CompressibleRainyEulerEquations2D`.
+@inline function terminal_velocity_rain(u,
                                         equations::CompressibleRainyEulerVectorInvariantEquations2D)
-    RealT = typeof(rho_rain)
+    _, _, _, _, rho_vapor, rho_cloud, rho_rain = u
+    RealT = eltype(u)
     if rho_rain > 0
+        if equations.rain_fall_speed_doppler_etal
+            rho_water = rho_vapor + rho_cloud + rho_rain
+        else
+            rho_water = equations.rho_liquid_water
+        end
         # Γ(4.5) / 6 ≈ 1.9386213994279082
         return equations.v_mean_rain * convert(RealT, 1.9386213994279082) *
                (rho_rain /
-                (convert(RealT, pi) * equations.rho_liquid_water *
-                 equations.rain_water_distr))^(0.125f0)
+                (convert(RealT, pi) * rho_water * equations.rain_water_distr))^(0.125f0)
     else
         return zero(RealT)
     end
@@ -278,7 +311,7 @@ end
                       equations::CompressibleRainyEulerVectorInvariantEquations2D)
     rho, v1, v2, rho_theta_v, rho_vapor, rho_cloud, rho_rain = u
     v_normal = v1 * normal_direction[1] + v2 * normal_direction[2]
-    v_rain = terminal_velocity_rain(rho_rain, equations)
+    v_rain = terminal_velocity_rain(u, equations)
     rain_flux = rho_rain * v_rain * normal_direction[2]
     kinetic_energy = 0.5f0 * (v1^2 + v2^2)
 
@@ -319,7 +352,7 @@ end
     g3 = v1_ll * vorticity
 
     # Transport of momentum by falling rain, -(ρ_r v_r / ρ) ∂_z v
-    rain_mass_flux_ll = rho_rain_ll * terminal_velocity_rain(rho_rain_ll, equations)
+    rain_mass_flux_ll = rho_rain_ll * terminal_velocity_rain(u_ll, equations)
     rain_advection = rain_mass_flux_ll / rho_ll * normal_direction[2]
     g2 = g2 - rain_advection * jump_v1
     g3 = g3 - rain_advection * jump_v2
@@ -338,8 +371,8 @@ end
 end
 
 """
-    flux_nonconservative_isothermal(u_ll, u_rr, normal_direction::AbstractVector,
-                                    equations::CompressibleRainyEulerVectorInvariantEquations2D)
+    flux_nonconservative_isothermal_isentropic(u_ll, u_rr, normal_direction::AbstractVector,
+                                               equations::CompressibleRainyEulerVectorInvariantEquations2D)
 
 Nonconservative terms of the [`CompressibleRainyEulerVectorInvariantEquations2D`](@ref).
 The pressure gradient and gravity terms are discretized as
@@ -358,9 +391,9 @@ The remaining nonconservative terms (vorticity, transport of momentum by falling
 frictional heating by falling rain) are discretized in the standard way with the local
 factors of the own state multiplied by the jumps.
 """
-@inline function flux_nonconservative_isothermal(u_ll, u_rr,
-                                                 normal_direction::AbstractVector,
-                                                 equations::CompressibleRainyEulerVectorInvariantEquations2D)
+@inline function flux_nonconservative_isothermal_isentropic(u_ll, u_rr,
+                                                            normal_direction::AbstractVector,
+                                                            equations::CompressibleRainyEulerVectorInvariantEquations2D)
     theta_v_num = inv_ln_mean(u_ll[1] / u_ll[4], u_rr[1] / u_rr[4])
     return _flux_nonconservative_vector_invariant(u_ll, u_rr, normal_direction,
                                                   theta_v_num, equations)
@@ -382,7 +415,7 @@ isentropic balance of the dry equations in
   [arXiv: 2610.05820](https://arxiv.org/abs/2610.05820)
 
 The remaining nonconservative terms are discretized as in
-[`flux_nonconservative_isothermal`](@ref).
+[`flux_nonconservative_isothermal_isentropic`](@ref).
 """
 @inline function flux_nonconservative_isentropic(u_ll, u_rr,
                                                  normal_direction::AbstractVector,
@@ -398,7 +431,7 @@ end
                                 equations::CompressibleRainyEulerVectorInvariantEquations2D)
     rho, v1, v2 = u
     c = sqrt(equations.gamma * pressure(u, equations) / rho)
-    v_rain = terminal_velocity_rain(u[7], equations)
+    v_rain = terminal_velocity_rain(u, equations)
     return abs(v1) + c, abs(v2) + c + v_rain
 end
 
@@ -408,9 +441,9 @@ end
     rho_rr, v1_rr, v2_rr = u_rr
 
     v_ll = abs(v1_ll * normal_direction[1] + v2_ll * normal_direction[2]) +
-           terminal_velocity_rain(u_ll[7], equations) * abs(normal_direction[2])
+           terminal_velocity_rain(u_ll, equations) * abs(normal_direction[2])
     v_rr = abs(v1_rr * normal_direction[1] + v2_rr * normal_direction[2]) +
-           terminal_velocity_rain(u_rr[7], equations) * abs(normal_direction[2])
+           terminal_velocity_rain(u_rr, equations) * abs(normal_direction[2])
 
     c_ll = sqrt(equations.gamma * pressure(u_ll, equations) / rho_ll)
     c_rr = sqrt(equations.gamma * pressure(u_rr, equations) / rho_rr)
@@ -451,13 +484,11 @@ end
 # Source terms
 
 """
-    SourceTermsWarmRain(; condensation_time_scale)
+    SourceTermsWarmRain(; condensation_time_scale, condensation_on_rain = true)
 
 Source terms of the warm-rain microphysics for the
 [`CompressibleRainyEulerVectorInvariantEquations2D`](@ref). They contain
-- condensation of vapor and evaporation of cloud water, modeled as relaxation towards
-  saturation, ``\\mathcal{C} = \\max(\\varrho_v - \\varrho_{vs}(T), -\\varrho_c) / \\tau``,
-  with the time scale ``\\tau`` = `condensation_time_scale`,
+- condensation of vapor and evaporation of cloud water ``\\mathcal{C}``,
 - autoconversion ``10^{-3}\\,\\mathrm{s}^{-1}\\,\\varrho_c`` and accretion
   ``1.72\\, \\varrho_c \\varrho_r^{7/8}`` of cloud water to rain,
 - evaporation of rain
@@ -466,17 +497,54 @@ Source terms of the warm-rain microphysics for the
 - the corresponding latent heating ``L_v^0 (\\mathcal{C} - \\mathcal{E}) / (c_{pd} \\Pi)``
   in the equation of the virtual potential temperature.
 
+The condensation is treated in one of two ways:
+- For a real number `condensation_time_scale` ``= \\tau``, it is modeled as relaxation
+  towards saturation,
+  ``\\mathcal{C} = \\max(\\varrho_v - \\varrho_{vs}(T), -\\varrho_c) / \\tau``.
+  Since ``\\mathcal{C}`` has the sign of ``\\varrho_v - \\varrho_{vs}``, it does not
+  decrease the thermodynamic entropy.
+- For `condensation_time_scale = nothing`, there is no condensation source term
+  (``\\mathcal{C} = 0``). Instead, the condensation is treated by instantaneous saturation
+  adjustment after every Runge-Kutta stage as for the
+  [`CompressibleRainyEulerEquations2D`](@ref), i.e., with the stage limiter
+  `NonlinearSolveDG(saturation_residual, saturation_residual_jacobian, SVector(4, 5, 6))`,
+  see [`saturation_residual`](@ref).
+
+With `condensation_on_rain = true`, the evaporation rate ``\\mathcal{E}`` is negative in
+supersaturated air, i.e., vapor condenses on rain. With `condensation_on_rain = false`,
+``\\mathcal{E}`` is limited to nonnegative values (evaporation only). This is consistent
+with the [`CompressibleRainyEulerEquations2D`](@ref), where the vapor density never exceeds
+the saturation vapor density due to the saturation adjustment, so that
+``\\mathcal{E} \\ge 0`` and the evaporated rain is added to the moist air
+``\\varrho_v + \\varrho_c``. With saturation adjustment, the evaporation is nonnegative up
+to the tolerance of the nonlinear solver in both cases.
+
 The rates of autoconversion, accretion, and rain evaporation are those of
-[`CompressibleRainyEulerEquations2D`](@ref). Since the condensation rate has the sign of
-``\\varrho_v - \\varrho_{vs}``, the phase changes do not decrease the thermodynamic entropy.
-Gravity is not part of the source terms, but of the nonconservative terms.
+[`CompressibleRainyEulerEquations2D`](@ref). Gravity is not part of the source terms, but of
+the nonconservative terms.
 """
-struct SourceTermsWarmRain{RealT <: Real}
-    condensation_time_scale::RealT
+struct SourceTermsWarmRain{TimeScaleT <: Union{Real, Nothing}}
+    condensation_time_scale::TimeScaleT
+    condensation_on_rain::Bool
 end
 
-function SourceTermsWarmRain(; condensation_time_scale)
-    return SourceTermsWarmRain(condensation_time_scale)
+function SourceTermsWarmRain(; condensation_time_scale, condensation_on_rain = true)
+    return SourceTermsWarmRain(condensation_time_scale, condensation_on_rain)
+end
+
+# Condensation (positive) or evaporation of cloud water (negative) by relaxation towards
+# saturation
+@inline function _condensation_rate(condensation_time_scale::Real, rho_vapor, rho_cloud,
+                                    rho_vs)
+    RealT = typeof(rho_vapor)
+    return max(rho_vapor - rho_vs, -rho_cloud) /
+           convert(RealT, condensation_time_scale)
+end
+
+# No condensation source term: the condensation is treated by saturation adjustment with
+# `NonlinearSolveDG`
+@inline function _condensation_rate(::Nothing, rho_vapor, rho_cloud, rho_vs)
+    return zero(rho_vapor)
 end
 
 @inline function (source::SourceTermsWarmRain)(u, x, t,
@@ -488,25 +556,125 @@ end
     rho_vs = saturation_vapor_pressure(T, equations) / (equations.R_v * T)
     rho_rain_pos = max(rho_rain, zero(RealT))
 
-    # Condensation (positive) or evaporation of cloud water (negative)
-    condensation = max(rho_vapor - rho_vs, -rho_cloud) /
-                   convert(RealT, source.condensation_time_scale)
+    condensation = _condensation_rate(source.condensation_time_scale, rho_vapor,
+                                      rho_cloud, rho_vs)
 
     # Autoconversion and accretion of cloud water
     conversion = convert(RealT, 1.0e-3) * rho_cloud +
                  convert(RealT, 1.72) * rho_cloud * rho_rain_pos^(0.875f0)
 
-    # Evaporation of rain
+    # Evaporation of rain (negative values: condensation on rain)
     evaporation = (convert(RealT, 3.86e-3) -
                    convert(RealT, 9.41e-5) * (T - equations.T_ref)) *
                   (1 + convert(RealT, 9.1) * rho_rain_pos^(0.1875f0)) *
                   (rho_vs - rho_vapor) * sqrt(rho_rain_pos)
+    if !source.condensation_on_rain
+        evaporation = max(evaporation, zero(RealT))
+    end
 
     heating = equations.L_0 * (condensation - evaporation) / (equations.c_pd * exner)
 
     zero_ = zero(RealT)
     return SVector(zero_, zero_, zero_, heating, -condensation + evaporation,
                    condensation - conversion, conversion - evaporation, zero_)
+end
+
+###############################################################################
+# Saturation adjustment
+
+"""
+    saturation_residual(u, guess,
+                        equations::CompressibleRainyEulerVectorInvariantEquations2D)
+
+Residual of the nonlinear system of the instantaneous saturation adjustment for the
+[`CompressibleRainyEulerVectorInvariantEquations2D`](@ref), to be used with
+`NonlinearSolveDG(saturation_residual, saturation_residual_jacobian, SVector(4, 5, 6))`
+and `SourceTermsWarmRain(condensation_time_scale = nothing)`.
+
+The unknowns `guess = (rho_theta_v, rho_vapor, rho_cloud)` are determined from the state
+`u` after a Runge-Kutta stage such that, at constant density, rain density, and internal
+energy, the vapor density is ``\\min(\\varrho_{vs}(T), \\varrho_v + \\varrho_c)``. This is
+the saturation adjustment of the [`CompressibleRainyEulerEquations2D`](@ref) (Doppler et
+al., 2024), where the moist air ``\\varrho_m = \\varrho_v + \\varrho_c`` is transported and
+the split into vapor and cloud water is recovered from the same conditions. Here, the
+internal energy of the constant-``\\kappa`` system is
+``p / (\\gamma - 1) + L_v^0 \\varrho_v`` up to terms that do not change during the
+adjustment, so the residual is
+```math
+\\begin{aligned}
+\\frac{p(\\varrho\\theta_v^*) - p(\\varrho\\theta_v)}{\\gamma - 1}
++ L_v^0 (\\varrho_v^* - \\varrho_v) &= 0, \\\\
+\\min\\left( \\frac{e_s(T^*)}{R_v T^*}, \\varrho_m \\right) - \\varrho_v^* &= 0, \\\\
+\\varrho_m - \\varrho_v^* - \\varrho_c^* &= 0,
+\\end{aligned}
+```
+with ``T^* = p(\\varrho\\theta_v^*) / (R_d \\varrho_d + R_v \\varrho_v^*)``. As for the
+[`CompressibleRainyEulerEquations2D`](@ref), the last two equations are scaled by ``10^7``.
+"""
+@inline function saturation_residual(u, guess,
+                                     equations::CompressibleRainyEulerVectorInvariantEquations2D)
+    @unpack R_d, R_v, L_0, inv_gamma_minus_one = equations
+    rho, _, _, _, rho_vapor, rho_cloud, rho_rain = u
+    rho_theta_v_guess, rho_vapor_guess, rho_cloud_guess = guess
+    rho_moist = rho_vapor + rho_cloud
+    rho_dry = rho - rho_moist - rho_rain
+
+    p = pressure(u, equations)
+    p_guess = equations.K * rho_theta_v_guess^equations.gamma
+    T_guess = p_guess / (R_d * rho_dry + R_v * rho_vapor_guess)
+
+    residual1 = (p_guess - p) * inv_gamma_minus_one + L_0 * (rho_vapor_guess - rho_vapor)
+
+    residual2 = min(saturation_vapor_pressure(T_guess, equations) / (R_v * T_guess),
+                    rho_moist)
+    residual2 -= rho_vapor_guess
+    residual2 *= 1.0f7
+
+    residual3 = rho_moist - rho_vapor_guess - rho_cloud_guess
+    residual3 *= 1.0f7
+
+    return SVector(residual1, residual2, residual3)
+end
+
+"""
+    saturation_residual_jacobian(u, guess,
+                                 equations::CompressibleRainyEulerVectorInvariantEquations2D)
+
+Jacobian of [`saturation_residual`](@ref) with respect to
+`guess = (rho_theta_v, rho_vapor, rho_cloud)`.
+"""
+@inline function saturation_residual_jacobian(u, guess,
+                                              equations::CompressibleRainyEulerVectorInvariantEquations2D)
+    @unpack c_pd, R_d, R_v, L_0, gamma, inv_gamma_minus_one = equations
+    rho, _, _, _, rho_vapor, rho_cloud, rho_rain = u
+    rho_theta_v_guess, rho_vapor_guess, _ = guess
+    rho_moist = rho_vapor + rho_cloud
+    rho_dry = rho - rho_moist - rho_rain
+
+    p_guess = equations.K * rho_theta_v_guess^gamma
+    denominator = R_d * rho_dry + R_v * rho_vapor_guess
+    T_guess = p_guess / denominator
+
+    dp_drho_theta_v = gamma * p_guess / rho_theta_v_guess
+    dT_drho_theta_v = dp_drho_theta_v / denominator
+    dT_drho_vapor = -T_guess * R_v / denominator
+
+    rho_vs = saturation_vapor_pressure(T_guess, equations) / (R_v * T_guess)
+    if rho_vs < rho_moist
+        # d log(ρ_vs) / dT = d log(e_s) / dT - 1 / T
+        drho_vs_dT = rho_vs * ((c_pd / R_d - 1) / T_guess + L_0 / (R_v * T_guess^2))
+        jacobian21 = 1.0f7 * drho_vs_dT * dT_drho_theta_v
+        jacobian22 = 1.0f7 * (drho_vs_dT * dT_drho_vapor - 1)
+    else
+        jacobian21 = zero(p_guess)
+        jacobian22 = -1.0f7 * one(p_guess)
+    end
+
+    zero_ = zero(p_guess)
+    # column-major order
+    return SMatrix{3, 3}(dp_drho_theta_v * inv_gamma_minus_one, jacobian21, zero_,
+                         L_0, jacobian22, -1.0f7 * one(p_guess),
+                         zero_, zero_, -1.0f7 * one(p_guess))
 end
 
 ###############################################################################
@@ -528,7 +696,7 @@ Moist atmosphere at rest in hydrostatic balance with constant virtual temperatur
 ``T_v = \theta_v \Pi = 280\,\mathrm{K}``, i.e., with
 ``p = p_0 \exp(-g z / (R_d T_v))`` and ``\varrho = p / (R_d T_v)``. The specific
 humidity decays exponentially with height, and there is no cloud water or rain.
-It is preserved by [`flux_nonconservative_isothermal`](@ref).
+It is preserved by [`flux_nonconservative_isothermal_isentropic`](@ref).
 """
 function initial_condition_isothermal(x, t,
                                       equations::CompressibleRainyEulerVectorInvariantEquations2D)
@@ -552,7 +720,8 @@ Moist atmosphere at rest in hydrostatic balance with constant virtual potential 
 ``\theta_v = 300\,\mathrm{K}``, i.e., with ``\Pi = 1 - g z / (c_{pd} \theta_v)`` and
 ``\varrho = p / (R_d \theta_v \Pi)``. The specific humidity decays exponentially with
 height, and there is no cloud water or rain. It is preserved by
-[`flux_nonconservative_isothermal`](@ref) and [`flux_nonconservative_isentropic`](@ref).
+[`flux_nonconservative_isothermal_isentropic`](@ref) and
+[`flux_nonconservative_isentropic`](@ref).
 """
 function initial_condition_adiabatic(x, t,
                                      equations::CompressibleRainyEulerVectorInvariantEquations2D)

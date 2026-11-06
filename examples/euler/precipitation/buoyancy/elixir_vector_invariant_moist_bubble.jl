@@ -55,8 +55,8 @@ initial_condition = initial_condition_moist_bubble
 # nonconservative terms preserving hydrostatic states with constant virtual temperature and
 # constant virtual potential temperature.
 polydeg = 3
-surface_flux = (flux_lax_friedrichs, flux_nonconservative_isothermal)
-volume_flux = (flux_central, flux_nonconservative_isothermal)
+surface_flux = (flux_lax_friedrichs, flux_nonconservative_isothermal_isentropic)
+volume_flux = (flux_central, flux_nonconservative_isothermal_isentropic)
 solver = DGSEM(polydeg = polydeg, surface_flux = surface_flux,
                volume_integral = VolumeIntegralFluxDifferencing(volume_flux))
 
