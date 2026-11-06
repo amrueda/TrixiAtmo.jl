@@ -841,3 +841,118 @@ end
         end
     end
 end
+
+@testitem "Unit: Consistency check for fluxes of rainy vector-invariant equations: CREVIE" setup=[Setup] tags=[:unit_fluxes] begin
+    equations = CompressibleRainyEulerVectorInvariantEquations2D(c_pd = 1004.0,
+                                                                 c_vd = 717.0,
+                                                                 R_v = 461.0,
+                                                                 gravity = EARTH_GRAVITATIONAL_ACCELERATION)
+    # (rho, v1, v2, rho_theta_v, rho_vapor, rho_cloud, rho_rain, phi)
+    u_ll = SVector(1.1, -0.5, 2.34, 330.0, 0.012, 0.002, 0.003, 1500.0)
+    u_rr = SVector(0.9, 0.3, -1.2, 280.5, 0.008, 0.001, 0.004, 1700.0)
+
+    normal_directions = [SVector(1.0, 0.0),
+        SVector(0.0, 1.0),
+        SVector(0.5, -0.5),
+        SVector(-1.2, 0.3)]
+
+    for normal_direction in normal_directions
+        # Physical flux with rain falling in the negative second coordinate direction
+        rho, v1, v2, rho_theta_v, rho_vapor, rho_cloud, rho_rain = u_ll
+        v_normal = v1 * normal_direction[1] + v2 * normal_direction[2]
+        v_rain = TrixiAtmo.terminal_velocity_rain(rho_rain, equations)
+        rain_flux = rho_rain * v_rain * normal_direction[2]
+        kinetic_energy = 0.5 * (v1^2 + v2^2)
+        flux_physical = SVector(rho * v_normal - rain_flux,
+                                kinetic_energy * normal_direction[1],
+                                kinetic_energy * normal_direction[2],
+                                rho_theta_v * v_normal, rho_vapor * v_normal,
+                                rho_cloud * v_normal, rho_rain * v_normal - rain_flux, 0.0)
+        @test flux(u_ll, normal_direction, equations) ≈ flux_physical
+        @test flux_central(u_ll, u_ll, normal_direction, equations) ≈ flux_physical
+        @test flux_lax_friedrichs(u_ll, u_ll, normal_direction, equations) ≈
+              flux_physical
+
+        for nonconservative_flux in (flux_nonconservative_isothermal,
+                                     flux_nonconservative_isentropic)
+            # The nonconservative fluxes are proportional to jumps
+            @test all(iszero, nonconservative_flux(u_ll, u_ll, normal_direction,
+                                                   equations))
+            # Homogeneity of degree one in the normal direction
+            @test nonconservative_flux(u_ll, u_rr, 2.5 * normal_direction, equations) ≈
+                  2.5 * nonconservative_flux(u_ll, u_rr, normal_direction, equations)
+            # Only the momentum and the virtual potential temperature are affected
+            noncons = nonconservative_flux(u_ll, u_rr, normal_direction, equations)
+            @test all(iszero, noncons[[1, 5, 6, 7, 8]])
+        end
+
+        @test max_abs_speed_naive(u_ll, u_rr, 2.5 * normal_direction, equations) ≈
+              2.5 * max_abs_speed_naive(u_ll, u_rr, normal_direction, equations)
+    end
+
+    # The pressure gradient and gravity terms vanish pointwise for hydrostatic states:
+    # constant virtual temperature with `flux_nonconservative_isothermal`, and constant
+    # virtual potential temperature with both fluxes
+    x_ll = SVector(100.0, 250.0)
+    x_rr = SVector(130.0, 410.0)
+    normal_direction = SVector(0.3, 1.1)
+    for (initial_condition, nonconservative_fluxes) in ((initial_condition_isothermal,
+                                                         (flux_nonconservative_isothermal,)),
+                                                        (initial_condition_adiabatic,
+                                                         (flux_nonconservative_isothermal,
+                                                          flux_nonconservative_isentropic)))
+        u_bottom = initial_condition(x_ll, 0.0, equations)
+        u_top = initial_condition(x_rr, 0.0, equations)
+        for nonconservative_flux in nonconservative_fluxes
+            noncons = nonconservative_flux(u_bottom, u_top, normal_direction, equations)
+            @test isapprox(noncons[2], 0.0; atol = 1.0e-10)
+            @test isapprox(noncons[3], 0.0; atol = 1.0e-10)
+        end
+    end
+    # ... but not for constant virtual temperature with the arithmetic mean
+    u_ll = initial_condition_isothermal(x_ll, 0.0, equations)
+    u_rr = initial_condition_isothermal(x_rr, 0.0, equations)
+    @test abs(flux_nonconservative_isentropic(u_ll, u_rr, normal_direction,
+                                              equations)[3]) > 1.0e-6
+
+    # The entropy variables are the derivatives of the entropy
+    u = SVector(1.1, -0.5, 2.34, 330.0, 0.012, 0.002, 0.003, 1500.0)
+    w = cons2entropy(u, equations)
+    for v in 1:8
+        epsilon = 1.0e-7 * max(abs(u[v]), 1.0e-3)
+        e_v = SVector(ntuple(i -> i == v ? epsilon : 0.0, 8))
+        @test isapprox(w[v],
+                       (entropy(u + e_v, equations) - entropy(u - e_v, equations)) /
+                       (2 * epsilon); rtol = 1.0e-5, atol = 1.0e-8)
+    end
+
+    # The saturation vapor pressure is consistent with the chemical potentials: at
+    # saturation, the entropy variables of vapor and liquid water coincide, i.e.,
+    # w[5] == w[6] (and the latent heat makes condensation entropy-neutral)
+    T = 280.0
+    rho = 1.1
+    rho_vs = TrixiAtmo.saturation_vapor_pressure(T, equations) / (equations.R_v * T)
+    rho_cloud = 0.001
+    rho_dry = rho - rho_vs - rho_cloud
+    p = (equations.R_d * rho_dry + equations.R_v * rho_vs) * T
+    u = prim2cons(SVector(rho, 0.0, 0.0, p, rho_vs, rho_cloud, 0.0, 0.0), equations)
+    w = cons2entropy(u, equations)
+    # μ_v - μ_l = T (σ_l - σ_v) + L_0 with σ_l = 0 vanishes at saturation
+    sigma_vapor = w[6] - w[5]
+    @test isapprox(equations.L_0 - T * sigma_vapor, 0.0; atol = 1.0e-6)
+    @test TrixiAtmo.saturation_vapor_pressure(equations.T_ref, equations) ≈
+          equations.e_s_ref
+
+    # The microphysics conserves the total mass and the total water, and the latent heating
+    # is consistent with the conversion rates
+    source_terms = SourceTermsWarmRain(condensation_time_scale = 5.0)
+    for u in (SVector(1.1, 0.0, 0.0, 330.0, 0.012, 0.002, 0.003, 1500.0),
+              SVector(1.1, 0.0, 0.0, 330.0, 0.001, 0.002, 0.003, 1500.0))
+        s = source_terms(u, SVector(0.0, 0.0), 0.0, equations)
+        @test iszero(s[1]) && iszero(s[2]) && iszero(s[3]) && iszero(s[8])
+        @test isapprox(s[5] + s[6] + s[7], 0.0; atol = 1.0e-16)
+        @test s[4] ≈
+              -equations.L_0 * s[5] /
+              (equations.c_pd * TrixiAtmo.exner_pressure(u, equations))
+    end
+end

@@ -720,3 +720,42 @@ end
         @test eltype(@inferred Trixi.max_abs_speeds(u, equations)) == RealT
     end
 end
+
+@testitem "Type stability: Compressible Rainy Euler Vector Invariant 2D" setup=[Setup] tags=[:type_stable_tests] begin
+    for RealT in (Float32, Float64)
+        equations = @inferred CompressibleRainyEulerVectorInvariantEquations2D(c_pd = RealT(1004),
+                                                                               c_vd = RealT(717),
+                                                                               R_v = RealT(461),
+                                                                               gravity = RealT(EARTH_GRAVITATIONAL_ACCELERATION))
+
+        u = u_ll = u_rr = cons = SVector(one(RealT), one(RealT), one(RealT),
+                                         convert(RealT, 300), convert(RealT, 0.01),
+                                         convert(RealT, 0.001), convert(RealT, 0.001),
+                                         one(RealT))
+        x = SVector(one(RealT), convert(RealT, 100))
+        t = zero(RealT)
+
+        normal_direction = SVector(one(RealT), one(RealT))
+
+        @test eltype(@inferred flux(u, normal_direction, equations)) == RealT
+        @test eltype(@inferred flux_nonconservative_isothermal(u_ll, u_rr,
+                                                               normal_direction,
+                                                               equations)) == RealT
+        @test eltype(@inferred flux_nonconservative_isentropic(u_ll, u_rr,
+                                                               normal_direction,
+                                                               equations)) == RealT
+        @test typeof(@inferred max_abs_speed_naive(u_ll, u_rr, normal_direction,
+                                                   equations)) == RealT
+        @test eltype(@inferred Trixi.max_abs_speeds(u, equations)) == RealT
+        @test eltype(@inferred cons2prim(u, equations)) == RealT
+        @test eltype(@inferred prim2cons(u, equations)) == RealT
+        @test eltype(@inferred cons2entropy(u, equations)) == RealT
+        @test typeof(@inferred pressure(u, equations)) == RealT
+        @test typeof(@inferred entropy(cons, equations)) == RealT
+
+        source_terms = SourceTermsWarmRain(condensation_time_scale = RealT(5))
+        @test eltype(@inferred source_terms(u, x, t, equations)) == RealT
+        @test eltype(@inferred initial_condition_isothermal(x, t, equations)) == RealT
+        @test eltype(@inferred initial_condition_adiabatic(x, t, equations)) == RealT
+    end
+end

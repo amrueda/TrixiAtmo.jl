@@ -8,6 +8,13 @@ for human readability.
 ## Changes in the v0.1 lifecycle
 
 #### Added
+- The `CompressibleRainyEulerVectorInvariantEquations2D` are the compressible Euler
+  equations with warm-rain microphysics in vector-invariant form with the virtual potential
+  temperature as prognostic variable, using the constant-kappa thermodynamics of Eldred et
+  al. (2022). They come with the nonconservative fluxes `flux_nonconservative_isothermal`
+  and `flux_nonconservative_isentropic`, which preserve hydrostatic states with constant
+  virtual temperature and constant virtual potential temperature, and the source terms
+  `SourceTermsWarmRain`.
 - The `CompressibleEulerVectorInvariantEquationsWithGravity3D` are the compressible Euler
   equations with gravity in vector-invariant form with the potential temperature as
   prognostic variable. They come with the entropy and total energy conservative volume flux
